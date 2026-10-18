@@ -1,0 +1,104 @@
+name: sync-upstream
+
+# 自动同步上游 Ebony-Vinyl/dsh-our-free-model 的 main 分支与 v* 标签，
+# 并在上游发布新版本时构建 macOS 安装包（复用本仓库自带的 build-macos.yml）。
+#
+# 工作方式：
+#   1) 每日（或手动）把 main 变基到上游 main 之上并推送 → fork 的 main = 上游 main + 本 workflow 这一个提交。
+#   2) 把上游的 v* 标签镜像到本 fork。
+#   3) 对「尚未发布过 -macos-unofficial Release」的版本，调用 build-macos.yml 构建并发布 dmg。
+#
+# 说明：
+#   - 默认每次只构建【最新】v* 标签；如需补构建历史版本，请在手动触发时勾选 backfill。
+#   - 触发 build-macos.yml 走 workflow_dispatch（gh workflow run），不依赖标签推送自动触发，
+#     因此【无需配置任何 Personal Access Token】，使用仓库自带的 GITHUB_TOKEN 即可。
+#   - 本 workflow 会 force-push main（变基）。请确保你不会在 fork 的 main 上手动提交代码。
+
+on:
+  schedule:
+    - cron: '17 4 * * *'   # 每天 UTC 04:17
+  workflow_dispatch:
+    inputs:
+      backfill:
+        description: '构建所有尚未发布过 macOS 包的历史 v* 标签'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork main
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
+          fetch-depth: 0
+          fetch-tags: true
+          token: ${{ github.token }}
+
+      - name: Git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/Ebony-Vinyl/dsh-our-free-model.git
+          git fetch upstream --tags
+
+      - name: Sync main onto upstream/main (rebase + force-with-lease)
+        run: |
+          set -euo pipefail
+          git rebase upstream/main
+          git push --force-with-lease origin main
+
+      - name: Mirror v* tags from upstream
+        run: |
+          set -euo pipefail
+          # 仅推送上游 v* 标签；已存在的标签会被跳过，不会重复触发。
+          git push origin 'refs/tags/v*:refs/tags/v*'
+
+      - name: Build & publish macOS for missing releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BACKFILL: ${{ github.event.inputs.backfill }}
+        run: |
+          set -euo pipefail
+          mapfile -t TAGS < <(git tag -l 'v*' | sort -V)
+          TO_BUILD=()
+          for tag in "${TAGS[@]}"; do
+            rt="${tag}-macos-unofficial"
+            if gh release view "$rt" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              continue   # 已经发布过，跳过
+            fi
+            if [ "${BACKFILL:-false}" = "true" ]; then
+              TO_BUILD+=("$tag")
+            fi
+          done
+          # 默认只构建最新版本（除非开启了 backfill）
+          if [ "${#TO_BUILD[@]}" -eq 0 ]; then
+            latest="${TAGS[-1]:-}"
+            if [ -n "$latest" ]; then
+              rt="${latest}-macos-unofficial"
+              if ! gh release view "$rt" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+                TO_BUILD+=("$latest")
+              fi
+            fi
+          fi
+          if [ "${#TO_BUILD[@]}" -eq 0 ]; then
+            echo "没有需要构建的新版本。"
+            exit 0
+          fi
+          for tag in "${TO_BUILD[@]}"; do
+            echo "触发 macOS 构建：$tag"
+            gh workflow run build-macos.yml --ref "$tag"
+            sleep 15
+          done
