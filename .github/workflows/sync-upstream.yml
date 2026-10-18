@@ -99,6 +99,6 @@ jobs:
           fi
           for tag in "${TO_BUILD[@]}"; do
             echo "触发 macOS 构建：$tag"
-            gh workflow run build-macos.yml --ref "$tag"
+            gh workflow run build-macos.yml --repo "$GITHUB_REPOSITORY" --ref "$tag"
             sleep 15
           done
