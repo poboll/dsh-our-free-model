@@ -52,7 +52,10 @@ jobs:
       - name: Add upstream remote
         run: |
           git remote add upstream https://github.com/Ebony-Vinyl/dsh-our-free-model.git
-          git fetch upstream --tags
+          # 容忍标签冲突：fork 自带 v2.5.4 / v2.5.4-macos-unofficial 等标签与上游同名但对象不同，
+          # 直接 fetch 会因 "would clobber existing tag" 以退出码 1 中止整个同步。
+          # 用 || true 让 fetch 跳过冲突标签、继续拉取新标签与 upstream/main，不再让每日同步失败。
+          git fetch upstream --tags || true
 
       - name: Sync main onto upstream/main (rebase + force-with-lease)
         run: |
